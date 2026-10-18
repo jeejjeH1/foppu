@@ -1,6 +1,7 @@
-"""Usage: python3 tools/hard_alpha.py <dir of PNG frames> <alpha cutoff 0-255>  (edits the frames in place)
+"""Snap alpha to 0/255 so GIF's 1-bit transparency drops faint glows instead of dithering them into speckles.
 
-# Snap alpha to 0/255 so GIF's 1-bit transparency doesn't dither faint glows into speckles.
+    python3 tools/hard_alpha.py <dir of PNG frames> <alpha cutoff 0-255>    # edits the frames in place
+"""
 import sys, glob
 import numpy as np
 from PIL import Image
