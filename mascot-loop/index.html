@@ -63,6 +63,8 @@ import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 const DUR = 6;
 const TAU = Math.PI * 2;
 const MODE = location.hash.slice(1);           // '' (viewer), 'capture', 'capture-alpha'
+// ?lite: locked camera, no particles, static backdrop. Far fewer pixels change per frame, so GIFs stay small.
+const LITE = new URLSearchParams(location.search).has('lite');
 const ALPHA = MODE === 'capture-alpha';
 if (MODE) document.body.classList.add('capture');
 if (ALPHA) document.body.classList.add('capture-alpha');
@@ -406,11 +408,11 @@ const hearts = [[0.75, 2.2, 0.0], [-0.55, 2.45, 0.6], [0.2, 2.6, 1.1]].map(([x, 
 /* ================= the stage ================= */
 // screen-space background: deep purple radial glow, faint hex lattice that parallaxes with the camera
 const bgMat = new THREE.ShaderMaterial({
-  uniforms: { uYaw: { value: 0 }, uT: { value: 0 } },
+  uniforms: { uYaw: { value: 0 }, uT: { value: 0 }, uMove: { value: LITE ? 0 : 1 } },
   depthWrite: false, depthTest: false,
   vertexShader: `varying vec2 vP; void main(){ vP = position.xy; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
   fragmentShader: /* glsl */`
-    uniform float uYaw, uT; varying vec2 vP;
+    uniform float uYaw, uT, uMove; varying vec2 vP;
     float hexd(vec2 p) { p = abs(p); return max(dot(p, vec2(0.8660254, 0.5)), p.y); }
     vec2 hexCell(vec2 p) {
       vec2 r = vec2(1.0, 1.7320508), h = r * 0.5;
@@ -425,7 +427,7 @@ const bgMat = new THREE.ShaderMaterial({
       vec2 hp = (p + vec2(uYaw * 0.9, 0.0)) * 5.5;
       vec2 c = hexCell(hp);
       float edge = smoothstep(0.47, 0.5, hexd(c));
-      float pulse = 0.5 + 0.5 * sin(6.2831853 * uT / 6.0 * 2.0 - d * 7.0);
+      float pulse = 0.5 + 0.5 * sin(6.2831853 * uT / 6.0 * 2.0 - d * 7.0) * uMove;
       col += vec3(0.55, 0.1, 0.8) * edge * (0.05 + 0.06 * pulse) * smoothstep(1.3, 0.25, d);
       col *= 1.0 - 0.45 * smoothstep(0.7, 1.45, d);
       gl_FragColor = vec4(col, 1.0);
@@ -525,7 +527,7 @@ const pMat = new THREE.ShaderMaterial({
   #include <colorspace_fragment>
   }`,
 });
-const particles = new THREE.Points(pGeo, pMat); particles.frustumCulled = false; world.add(particles);
+const particles = new THREE.Points(pGeo, pMat); particles.frustumCulled = false; if (!LITE) world.add(particles);
 
 /* ================= face animation ================= */
 // Timeline (s): 0-1.9 smug, blink, 1.9-3.9 happy, glitch, 4.05-5.4 wink, blink, 5.4-6 smug.
@@ -626,8 +628,9 @@ function render(t) {
   const st = drawFace(t);
 
   // camera: a slow sway around the character, two gentle dips per loop
-  const yaw = 0.32 * loopSin(t, 1), dist = 11.2 + 0.25 * loopSin(t, 1, 1.3);
-  camera.position.set(Math.sin(yaw) * dist, 2.35 + 0.18 * loopSin(t, 2, 0.6), Math.cos(yaw) * dist);
+  const cam = LITE ? 0 : 1;
+  const yaw = 0.32 * loopSin(t, 1) * cam, dist = 11.2 + 0.25 * loopSin(t, 1, 1.3) * cam;
+  camera.position.set(Math.sin(yaw) * dist, 2.35 + 0.18 * loopSin(t, 2, 0.6) * cam, Math.cos(yaw) * dist);
   camTarget.set(0, 1.68, 0); camera.lookAt(camTarget);
   camera.updateMatrixWorld();
   for (const [k, v] of [['uKeyV', 'key'], ['uRimV1', 'rim1'], ['uRimV2', 'rim2']]) U[k].value.copy(LIGHT[v]).transformDirection(camera.matrixWorldInverse);

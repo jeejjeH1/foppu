@@ -8,6 +8,7 @@
 //   --size 1080x1080                viewport (default 1920x1080)
 //   --scale 2                       device pixel ratio, for supersampled frames (default 1)
 //   --out name                      file name stem for video mode (default genlayer-silent)
+//   --query lite                    query string for the page (default none)
 //   --alpha                         transparent background: video mode writes PNG frames
 //                                   into out/<name>-frames/ instead of an mp4
 //
@@ -44,7 +45,8 @@ const [W, H] = opt('--size', '1920x1080').split('x').map(Number);
 const outName = opt('--out', 'genlayer-silent');
 const scale = +opt('--scale', '1');
 const alpha = flag('--alpha');
-const url = `http://127.0.0.1:${server.address().port}/${pagePath}#${alpha ? 'capture-alpha' : 'capture'}`;
+const query = opt('--query', '');
+const url = `http://127.0.0.1:${server.address().port}/${pagePath}${query ? '?' + query : ''}#${alpha ? 'capture-alpha' : 'capture'}`;
 
 const browser = await chromium.launch({ args: ['--force-color-profile=srgb', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: scale });
