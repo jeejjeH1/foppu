@@ -135,6 +135,7 @@ const TOON_F = /* glsl */`
     col += rim * fres * uRim;
     col += uEmis;
     gl_FragColor = vec4(col, 1.0);
+    #include <colorspace_fragment>
   }`;
 function toon(o) {
   return new THREE.ShaderMaterial({
@@ -149,6 +150,8 @@ function toon(o) {
     vertexShader: TOON_V, fragmentShader: TOON_F, side: o.side ?? THREE.FrontSide,
   });
 }
+// additive glow that also adds coverage, so it survives on a transparent background
+const ADD = { blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneFactor };
 const glow = (hex, k = 1) => new THREE.MeshBasicMaterial({ color: new THREE.Color(hex).multiplyScalar(k), toneMapped: false });
 // Inverted-hull outline: the back faces of a slightly inflated copy, drawn in ink.
 const OUTLINE = new THREE.ShaderMaterial({
@@ -354,6 +357,7 @@ const visorMat = new THREE.ShaderMaterial({
       float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
       col += vec3(0.2, 0.7, 0.9) * fres * 0.35;
       gl_FragColor = vec4(col, 1.0);
+      #include <colorspace_fragment>
     }`,
 });
 const visor = new THREE.Mesh(capGeo(1.04, VISOR_ANG), visorMat); visor.rotation.copy(FRAME_DIR); skull.add(visor);
@@ -459,6 +463,7 @@ const platTop = new THREE.ShaderMaterial({
       float s = length(vP * vec2(1.0, 1.25)) / (0.62 * uShadow);
       col *= mix(0.35, 1.0, smoothstep(0.35, 1.05, s));
       gl_FragColor = vec4(col, 1.0);
+      #include <colorspace_fragment>
     }`,
 });
 const platSide = toon({ color: '#3a2457', color2: '#160b26', g0: -0.3, g1: 0.1, rim: 0.8 });
@@ -471,14 +476,16 @@ const rimBot = new THREE.Mesh(new THREE.TorusGeometry(1.25, 0.018, 4, 6), glow(C
 rimBot.rotation.set(Math.PI / 2, 0, Math.PI / 6); rimBot.position.y = -0.3; plat.add(rimBot);
 // soft hologram column rising from the platform
 const beamMat = new THREE.ShaderMaterial({
-  uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, ...ADD, side: THREE.DoubleSide,
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: /* glsl */`
     uniform float uT; varying vec2 vUv;
     void main() {
       float fade = pow(1.0 - vUv.y, 2.2);
       float streak = 0.55 + 0.45 * sin(vUv.x * 6.2831853 * 18.0) * sin(vUv.y * 9.0 - 6.2831853 * uT / 3.0);
-      gl_FragColor = vec4(vec3(0.75, 0.2, 1.0) * fade * streak * 0.07, 1.0);
+      vec3 c = vec3(0.75, 0.2, 1.0) * fade * streak * 0.07;
+      gl_FragColor = vec4(c, max(c.r, max(c.g, c.b)));
+      #include <colorspace_fragment>
     }`,
 });
 const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.32, 3.2, 6, 1, true), beamMat);
@@ -501,7 +508,7 @@ const pGeo = new THREE.BufferGeometry();
   pGeo.setAttribute('seed', new THREE.BufferAttribute(seed, 4));
 }
 const pMat = new THREE.ShaderMaterial({
-  uniforms: { uT: { value: 0 }, uScale: { value: 1 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  uniforms: { uT: { value: 0 }, uScale: { value: 1 } }, transparent: true, depthWrite: false, ...ADD,
   vertexShader: /* glsl */`
     attribute vec4 seed; uniform float uT, uScale; varying float vA; varying vec3 vC;
     void main() {
@@ -514,7 +521,9 @@ const pMat = new THREE.ShaderMaterial({
       gl_PointSize = uScale * (0.05 + 0.04 * fract(seed.x * 3.1)) / -mv.z;
       gl_Position = projectionMatrix * mv;
     }`,
-  fragmentShader: `varying float vA; varying vec3 vC; void main(){ vec2 q = abs(gl_PointCoord - 0.5); float s = 1.0 - smoothstep(0.32, 0.5, max(q.x, q.y)); gl_FragColor = vec4(vC * 1.6 * vA * s, 1.0); }`,
+  fragmentShader: `varying float vA; varying vec3 vC; void main(){ vec2 q = abs(gl_PointCoord - 0.5); float s = 1.0 - smoothstep(0.32, 0.5, max(q.x, q.y)); vec3 c = vC * 1.6 * vA * s; gl_FragColor = vec4(c, min(1.0, max(c.r, max(c.g, c.b)))); 
+  #include <colorspace_fragment>
+  }`,
 });
 const particles = new THREE.Points(pGeo, pMat); particles.frustumCulled = false; world.add(particles);
 
