@@ -43,6 +43,7 @@ A seamless 6-second 3D loop of the GenLayer cat mascot for avatars, stickers and
 |---|---|
 | `mascot-loop/genlayer-mascot-loop.mp4` | 1080×1080, 60 fps, with the music loop |
 | `mascot-loop/genlayer-mascot-loop.gif` | 420×420, 25 fps GIF for chats and READMEs |
+| `mascot-loop/genlayer-mascot-loop-hq.gif` | 720×720, 30 fps high-quality GIF made with [gifski](https://gif.ski) (about 29 MB) |
 | `mascot-loop/genlayer-mascot-loop-alpha.webm` | transparent background (VP9 + alpha), for overlays and stickers |
 | `mascot-loop/index.html` | the scene (Three.js r170, vendored in `mascot-loop/vendor/`) with a small player |
 | `mascot-loop/make_loop_audio.py` | synthesizes the music loop and sound effects (blinks, heart pops, glitch, sparkle) |
@@ -59,6 +60,9 @@ ffmpeg -y -i out/mascot-2160.mp4 -i out/mascot-loop.wav -vf scale=1080:1080:flag
   mascot-loop/genlayer-mascot-loop.mp4
 ffmpeg -y -i out/mascot-2160.mp4 -vf "fps=25,scale=420:420:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle" \
   -loop 0 mascot-loop/genlayer-mascot-loop.gif
+# high-quality GIF (gifski: https://gif.ski)
+mkdir -p out/gif-frames && ffmpeg -i out/mascot-2160.mp4 -vf "fps=30,scale=720:720:flags=lanczos" out/gif-frames/f%04d.png
+gifski --fps 30 --quality 90 --width 720 -o mascot-loop/genlayer-mascot-loop-hq.gif out/gif-frames/f*.png
 # transparent version
 node tools/render.mjs --page mascot-loop/index.html --size 1080x1080 --alpha --out mascot-alpha video 30
 ffmpeg -y -framerate 30 -i out/mascot-alpha-frames/f%05d.png -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30 \
