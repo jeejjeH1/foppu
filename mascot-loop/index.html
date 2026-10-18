@@ -65,6 +65,8 @@ const TAU = Math.PI * 2;
 const MODE = location.hash.slice(1);           // '' (viewer), 'capture', 'capture-alpha'
 // ?lite: locked camera, no particles, static backdrop. Far fewer pixels change per frame, so GIFs stay small.
 const LITE = new URLSearchParams(location.search).has('lite');
+// ?solo: only the cat and its hearts (no platform, halo or backdrop), for transparent stickers.
+const SOLO = new URLSearchParams(location.search).has('solo');
 const ALPHA = MODE === 'capture-alpha';
 if (MODE) document.body.classList.add('capture');
 if (ALPHA) document.body.classList.add('capture-alpha');
@@ -434,10 +436,10 @@ const bgMat = new THREE.ShaderMaterial({
     }`,
 });
 const bg = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat); bg.frustumCulled = false; bg.renderOrder = -10;
-if (!ALPHA) scene.add(bg);
+if (!ALPHA && !SOLO) scene.add(bg);
 
 // network halo behind the head: two hex outlines with glowing validator nodes on the corners
-const halo = new THREE.Group(); halo.position.set(0, 2.1, -1.7); world.add(halo);
+const halo = new THREE.Group(); halo.position.set(0, 2.1, -1.7); if (!SOLO) world.add(halo);
 const haloOuter = new THREE.Group(), haloInner = new THREE.Group(); halo.add(haloOuter, haloInner);
 haloOuter.add(new THREE.Mesh(new THREE.TorusGeometry(2.05, 0.02, 4, 6), glow(COL.magenta, 1.1)));
 haloInner.add(new THREE.Mesh(new THREE.TorusGeometry(1.62, 0.012, 4, 6), glow(COL.pink, 0.55)));
@@ -448,7 +450,7 @@ for (let i = 0; i < 6; i++) {
 }
 
 // hex platform
-const plat = new THREE.Group(); world.add(plat);
+const plat = new THREE.Group(); if (!SOLO) world.add(plat);
 const platTop = new THREE.ShaderMaterial({
   uniforms: { uT: { value: 0 }, uShadow: { value: 1 } },
   vertexShader: `varying vec2 vP; void main(){ vP = position.xz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
