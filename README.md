@@ -46,6 +46,7 @@ A seamless 6-second 3D loop of the GenLayer cat mascot for avatars, stickers and
 | `mascot-loop/genlayer-mascot-loop-hq.gif` | 720×720, 30 fps high-quality GIF made with [gifski](https://gif.ski) (about 29 MB) |
 | `mascot-loop/genlayer-mascot-loop-discord.gif` | 540×540, 30 fps, under Discord's 10 MB upload limit (lite render: locked camera, no particles) |
 | `mascot-loop/genlayer-mascot-loop-discord-transparent.gif` | 540×540, 30 fps, transparent background, cat and hearts only, under 10 MB |
+| `mascot-loop/genlayer-mascot-loop-discord-alpha.gif` | 540×540, 30 fps, the full transparent scene (same as the WebM: platform, halo, particles), under 10 MB |
 | `mascot-loop/genlayer-mascot-loop-alpha.webm` | transparent background (VP9 + alpha), for overlays and stickers |
 | `mascot-loop/index.html` | the scene (Three.js r170, vendored in `mascot-loop/vendor/`) with a small player |
 | `mascot-loop/make_loop_audio.py` | synthesizes the music loop and sound effects (blinks, heart pops, glitch, sparkle) |
@@ -73,6 +74,10 @@ gifski --fps 30 --quality 85 --width 540 -o mascot-loop/genlayer-mascot-loop-dis
 node tools/render.mjs --page mascot-loop/index.html --size 1080x1080 --query "lite&solo" --alpha --out solo-alpha video 30
 mkdir -p out/solo-540 && ffmpeg -framerate 30 -i out/solo-alpha-frames/f%05d.png -vf "crop=880:880:95:0,scale=540:540:flags=lanczos" -pix_fmt rgba out/solo-540/f%04d.png
 gifski --fps 30 --quality 90 --width 540 -o mascot-loop/genlayer-mascot-loop-discord-transparent.gif out/solo-540/f*.png
+# transparent Discord GIF of the full scene, from the --alpha frames made for the WebM
+mkdir -p out/fa-540 && ffmpeg -framerate 30 -i out/mascot-alpha-frames/f%05d.png -vf "scale=540:540:flags=lanczos" -pix_fmt rgba out/fa-540/f%04d.png
+python3 tools/hard_alpha.py out/fa-540 90
+gifski --fps 30 --quality 90 --width 540 -o mascot-loop/genlayer-mascot-loop-discord-alpha.gif out/fa-540/f*.png
 # transparent version
 node tools/render.mjs --page mascot-loop/index.html --size 1080x1080 --alpha --out mascot-alpha video 30
 ffmpeg -y -framerate 30 -i out/mascot-alpha-frames/f%05d.png -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30 \
