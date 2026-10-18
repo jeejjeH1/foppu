@@ -32,3 +32,37 @@ ffmpeg -y -i out/genlayer-silent.mp4 -i audio/genlayer-soundtrack.wav \
 ```
 
 To preview in a browser, serve the folder (for example `npx serve .`) and open `index.html`.
+
+---
+
+# GenLayer · Mascot Loop
+
+A seamless 6-second 3D loop of the GenLayer cat mascot for avatars, stickers and posts, 1080×1080 at 60 fps. The cat hovers over a turning hex platform in front of a halo of network nodes, wags its tail, twitches its ears and cycles its screen face: **smug → blink → happy (waves, hearts pop out) → glitch → wink → blink → smug**. Every motion is a periodic function of time, so the last frame flows straight back into the first.
+
+| File | What it is |
+|---|---|
+| `mascot-loop/genlayer-mascot-loop.mp4` | 1080×1080, 60 fps, with the music loop |
+| `mascot-loop/genlayer-mascot-loop.gif` | 540×540 GIF for chats and READMEs |
+| `mascot-loop/genlayer-mascot-loop-alpha.webm` | transparent background (VP9 + alpha), for overlays and stickers |
+| `mascot-loop/index.html` | the scene (Three.js r170, vendored in `mascot-loop/vendor/`) with a small player |
+| `mascot-loop/make_loop_audio.py` | synthesizes the music loop and sound effects (blinks, heart pops, glitch, sparkle) |
+
+The character is built from primitives in code: a cel shader with purple-tinted shadows and a pink/cyan rim, inverted-hull ink outlines, and a face drawn every frame onto a canvas as an LED grid, using the same vector GenLayer mark as the Many Minds video.
+
+## Rebuild the loop
+
+```sh
+node tools/render.mjs --page mascot-loop/index.html --size 1080x1080 --scale 2 --out mascot-2160 video 60
+python3 mascot-loop/make_loop_audio.py
+ffmpeg -y -i out/mascot-2160.mp4 -i out/mascot-loop.wav -vf scale=1080:1080:flags=lanczos \
+  -c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest -movflags +faststart \
+  mascot-loop/genlayer-mascot-loop.mp4
+ffmpeg -y -i out/mascot-2160.mp4 -vf "fps=30,scale=540:540:flags=lanczos,split[a][b];[a]palettegen=max_colors=200[p];[b][p]paletteuse=dither=sierra2_4a" \
+  -loop 0 mascot-loop/genlayer-mascot-loop.gif
+# transparent version
+node tools/render.mjs --page mascot-loop/index.html --size 1080x1080 --alpha --out mascot-alpha video 30
+ffmpeg -y -framerate 30 -i out/mascot-alpha-frames/f%05d.png -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 30 \
+  mascot-loop/genlayer-mascot-loop-alpha.webm
+```
+
+To preview, serve the repo root (for example `npx serve .`) and open `mascot-loop/index.html`.

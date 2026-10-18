@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GenLayer Mascot Loop</title>
+<style>
+@font-face { font-family: "Unbounded"; font-weight: 900; src: url(../assets/fonts/unbounded-latin-900-normal.woff2) format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 700; src: url(../assets/fonts/jetbrains-mono-latin-700-normal.woff2) format("woff2"); }
+:root {
+  --bg: #05010a;
+  --panel: #12061d;
+  --line: #2a1838;
+  --text: #f6ecff;
+  --muted: #a493b8;
+  --pink: #ff87ff;
+  --purple: #dc00ff;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 500 16px/1.6 system-ui, sans-serif; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 14px; }
+h1 { margin: 0; font: 900 clamp(1.1rem, 4vw, 1.7rem)/1.2 "Unbounded", system-ui, sans-serif; letter-spacing: .04em; }
+h1 span { color: var(--pink); }
+.stage { position: relative; aspect-ratio: 1; background: #000; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stage canvas { display: block; width: 100%; height: 100%; }
+.transport { display: flex; gap: 12px; align-items: center; }
+.transport button { font: 700 14px "JetBrains Mono", monospace; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; min-width: 104px; }
+.transport button:hover { border-color: var(--purple); }
+.transport input { flex: 1; min-width: 120px; accent-color: var(--purple); }
+.time { font: 700 13px "JetBrains Mono", monospace; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
+body.capture { overflow: hidden; background: #000; }
+body.capture-alpha { background: transparent; }
+body.capture .wrap { padding: 0; max-width: none; display: block; }
+body.capture h1, body.capture .transport { display: none; }
+body.capture .stage { position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; border-radius: 0; aspect-ratio: auto; background: transparent; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js", "three/addons/": "./vendor/jsm/" } }
+</script>
+</head>
+<body>
+<div class="wrap">
+  <h1>GenLayer · <span>Mascot Loop</span></h1>
+  <div class="stage"><canvas id="c"></canvas></div>
+  <div class="transport">
+    <button id="play">&#10073;&#10073; Pause</button>
+    <input id="scrub" type="range" min="0" max="6" step="0.01" value="0" aria-label="Timeline">
+    <span class="time" id="time">0.00 / 6.0</span>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* A seamless 6 s loop: the GenLayer cat mascot hovers over a hex platform, its screen face
+   cycles smug -> happy -> wink -> smug. Every value is a periodic function of t, so frame
+   DUR looks exactly like frame 0, and renderAt(t) is a pure function of time. */
+const DUR = 6;
+const TAU = Math.PI * 2;
+const MODE = location.hash.slice(1);           // '' (viewer), 'capture', 'capture-alpha'
+const ALPHA = MODE === 'capture-alpha';
+if (MODE) document.body.classList.add('capture');
+if (ALPHA) document.body.classList.add('capture-alpha');
+
+const COL = {
+  shell: '#f3f1fb', shell2: '#d9d6ea',
+  grey: '#b9b9c9', grey2: '#85849a',
+  purple: '#e23af6', purple2: '#9536d0',
+  earIn: '#7d8196', earIn2: '#555a70',
+  navy: '#4b5a92', navy2: '#2f3762',
+  mitt: '#4a4b70', mitt2: '#30304e',
+  tail: '#4a3e3a', tail2: '#2a2220',
+  ring: '#262a44', ink: '#140d1f',
+  cyan: '#3ff0ff', pink: '#ff87ff', magenta: '#dc00ff',
+};
+
+/* ---------------- small math helpers ---------------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const smooth = x => { x = clamp(x); return x * x * (3 - 2 * x); };
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const bump = (t, a, b) => Math.sin(Math.PI * seg(t, a, b));           // 0 -> 1 -> 0 over [a, b]
+const win = (t, a, b, e) => smooth(seg(t, a, a + e)) * (1 - smooth(seg(t, b - e, b)));
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+const loopSin = (t, k = 1, ph = 0) => Math.sin(TAU * k * t / DUR + ph); // periodic over DUR for integer k
+
+/* ---------------- renderer ---------------- */
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: ALPHA, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(MODE ? window.devicePixelRatio : Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, ALPHA ? 0 : 1);
+renderer.toneMapping = THREE.NoToneMapping;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(27, 1, 0.1, 100);
+
+/* ---------------- materials ---------------- */
+// Cel shading done by hand: two light bands, purple-tinted shadows, a pink/cyan rim, optional
+// vertical gradient (object-space y) and optional texture. Lighting runs in view space.
+const LIGHT = {
+  key: new THREE.Vector3(-0.55, 0.75, 0.65).normalize(),
+  rim1: new THREE.Vector3(0.9, 0.35, -0.6).normalize(),
+  rim2: new THREE.Vector3(-0.9, 0.1, -0.5).normalize(),
+};
+const U = { uKeyV: { value: new THREE.Vector3() }, uRimV1: { value: new THREE.Vector3() }, uRimV2: { value: new THREE.Vector3() } };
+const TOON_V = /* glsl */`
+  varying vec3 vN; varying vec3 vV; varying float vY; varying vec2 vUv;
+  void main() {
+    vUv = uv; vY = position.y;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vV = -mv.xyz; vN = normalize(normalMatrix * normal);
+    gl_Position = projectionMatrix * mv;
+  }`;
+const TOON_F = /* glsl */`
+  uniform vec3 uA, uB, uEmis, uKeyV, uRimV1, uRimV2;
+  uniform vec2 uG; uniform sampler2D uMap; uniform float uUseMap, uRim, uSpec;
+  varying vec3 vN; varying vec3 vV; varying float vY; varying vec2 vUv;
+  void main() {
+    vec3 n = normalize(vN); if (!gl_FrontFacing) n = -n;
+    vec3 v = normalize(vV);
+    vec3 base = mix(uB, uA, smoothstep(uG.x, uG.y, vY));
+    if (uUseMap > 0.5) { vec4 tx = texture2D(uMap, vUv); base = mix(base, tx.rgb, tx.a); }
+    float ndl = dot(n, uKeyV);
+    float lit = smoothstep(-0.03, 0.07, ndl);
+    float hi = smoothstep(0.80, 0.86, ndl);
+    vec3 col = base * mix(vec3(0.56, 0.52, 0.78), vec3(1.0), lit) + base * hi * 0.06;
+    float spec = smoothstep(0.955, 0.975, dot(reflect(-uKeyV, n), v)) * uSpec;
+    col += vec3(spec);
+    float fres = pow(1.0 - max(dot(n, v), 0.0), 2.6);
+    vec3 rim = vec3(1.0, 0.32, 1.0) * smoothstep(0.0, 0.4, dot(n, uRimV1)) + vec3(0.15, 0.85, 1.0) * smoothstep(0.0, 0.4, dot(n, uRimV2)) * 0.7;
+    col += rim * fres * uRim;
+    col += uEmis;
+    gl_FragColor = vec4(col, 1.0);
+  }`;
+function toon(o) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      ...U,
+      uA: { value: new THREE.Color(o.color) }, uB: { value: new THREE.Color(o.color2 || o.color) },
+      uG: { value: new THREE.Vector2(o.g0 ?? -1, o.g1 ?? 1) },
+      uMap: { value: o.map || null }, uUseMap: { value: o.map ? 1 : 0 },
+      uEmis: { value: new THREE.Color(o.emissive || 0x000000) },
+      uRim: { value: o.rim ?? 0.55 }, uSpec: { value: o.spec ?? 0.12 },
+    },
+    vertexShader: TOON_V, fragmentShader: TOON_F, side: o.side ?? THREE.FrontSide,
+  });
+}
+const glow = (hex, k = 1) => new THREE.MeshBasicMaterial({ color: new THREE.Color(hex).multiplyScalar(k), toneMapped: false });
+// Inverted-hull outline: the back faces of a slightly inflated copy, drawn in ink.
+const OUTLINE = new THREE.ShaderMaterial({
+  uniforms: { uW: { value: 0.03 }, uC: { value: new THREE.Color(COL.ink) } },
+  vertexShader: `uniform float uW; void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position + normal * uW, 1.0); }`,
+  fragmentShader: `uniform vec3 uC; void main(){ gl_FragColor = vec4(uC, 1.0); }`,
+  side: THREE.BackSide,
+});
+function hullOf(geo) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', geo.getAttribute('position').clone());
+  if (geo.index) g.setIndex(geo.index.clone());
+  const m = mergeVertices(g, 1e-4);
+  m.computeVertexNormals();
+  return m;
+}
+function part(geo, mat, parent, o = {}) {
+  const m = new THREE.Mesh(geo, mat);
+  if (o.pos) m.position.set(...o.pos);
+  if (o.rot) m.rotation.set(...o.rot);
+  if (o.scale) m.scale.set(...o.scale);
+  if (o.outline !== false) {
+    const h = new THREE.Mesh(o.shareHull ? geo : hullOf(geo), OUTLINE);
+    if (o.outlineW) { h.material = OUTLINE.clone(); h.material.uniforms.uW.value = o.outlineW; }
+    m.add(h);
+  }
+  parent.add(m);
+  return m;
+}
+// A sphere cap of angular radius `ang` around +Z, with UVs projected straight from the front.
+function capGeo(r, ang, seg = 64) {
+  const g = new THREE.SphereGeometry(r, seg, seg / 2, 0, TAU, 0, ang);
+  g.rotateX(Math.PI / 2);
+  const p = g.attributes.position, uv = g.attributes.uv, s = 2 * r * Math.sin(ang);
+  for (let i = 0; i < p.count; i++) uv.setXY(i, p.getX(i) / s + 0.5, p.getY(i) / s + 0.5);
+  return g;
+}
+function lightButton(parent, r, pos, normal, k = 1.6) {
+  const g = new THREE.Group();
+  g.position.set(...pos);
+  g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(...normal).normalize());
+  part(new THREE.CylinderGeometry(r * 1.45, r * 1.5, 0.05, 32), toon({ color: COL.ring, rim: 0.4 }), g, { outlineW: 0.012 });
+  const disc = part(new THREE.CylinderGeometry(r, r, 0.07, 32), glow(COL.cyan, k), g, { outline: false });
+  parent.add(g);
+  return disc;
+}
+
+/* ---------------- GenLayer mark (same trace as the Many Minds video) ---------------- */
+const LOGO = (() => {
+  const C0 = 229.25;
+  const Lp = [[213.5, 67], [213.5, 175], [157.2, 292], [210.3, 319], [65, 376]];
+  const Rp = Lp.map(([x, y]) => [2 * C0 - x, y]).reverse();
+  const Ip = [[C0, 212], [201, 268], [201, 280], [C0, 294], [2 * C0 - 201, 280], [2 * C0 - 201, 268]];
+  const cx = C0, cy = (67 + 376) / 2, h = 309;
+  const norm = p => p.map(([x, y]) => [(x - cx) / h, (y - cy) / h]);
+  return [norm(Lp), norm(Rp), norm(Ip)];
+})();
+function logoPath(c) {
+  c.beginPath();
+  for (const p of LOGO) { p.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); }
+}
+
+/* ================= the character ================= */
+const world = new THREE.Group(); scene.add(world);
+const char = new THREE.Group(); world.add(char);
+
+/* ---- body ---- */
+// Torso: a lathe whose texture carries the magenta chest mark. phiStart = PI puts u = 0.5 at the front.
+const torsoProfile = new THREE.CatmullRomCurve3([
+  [0.001, 0.46], [0.34, 0.47], [0.45, 0.62], [0.47, 0.82], [0.43, 1.02], [0.35, 1.2], [0.24, 1.33], [0.001, 1.38],
+].map(([x, y]) => new THREE.Vector3(x, y, 0))).getSpacedPoints(60).map(v => new THREE.Vector2(v.x, v.y));
+const torsoTex = (() => {
+  const W = 1024, H = 512, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  // arc length -> v, so the mark can be placed by height without stretching
+  const acc = [0]; for (let i = 1; i < torsoProfile.length; i++) acc.push(acc[i - 1] + torsoProfile[i].distanceTo(torsoProfile[i - 1]));
+  const L = acc[acc.length - 1];
+  const vAt = y => { for (let i = 1; i < torsoProfile.length; i++) if (torsoProfile[i].y >= y) return acc[i] / L; return 1; };
+  const vc = vAt(0.86), circ = TAU * 0.46;
+  const pxU = W / circ, pxV = H / L, s = 0.5;
+  c.save(); c.translate(W / 2, H * (1 - vc)); c.scale(s * pxU, s * pxV);
+  const g = c.createLinearGradient(0, -0.5, 0, 0.5); g.addColorStop(0, '#f05cff'); g.addColorStop(1, '#a51ee0');
+  c.fillStyle = g; logoPath(c); c.fill();
+  c.restore();
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+})();
+const body = new THREE.Group(); char.add(body);
+part(new THREE.LatheGeometry(torsoProfile, 64, Math.PI, TAU), toon({ color: COL.shell, color2: COL.shell2, g0: 0.4, g1: 1.2, map: torsoTex }), body);
+// grey yoke over shoulders and back, open at the chest
+part(new THREE.LatheGeometry(torsoProfile.filter(p => p.y > 1.0).map(p => new THREE.Vector2(p.x + 0.018, p.y)).concat([new THREE.Vector2(0.001, 1.4)]), 48, Math.PI * 0.3, Math.PI * 1.4),
+  toon({ color: COL.grey, color2: COL.grey2, g0: 1.0, g1: 1.38, side: THREE.DoubleSide }), body, { outline: false });
+const backLight = lightButton(body, 0.075, [0, 1.13, -0.425], [0, 0.05, -1]);
+// legs and paws
+const legMat = toon({ color: COL.shell, color2: COL.shell2, g0: 0, g1: 0.6 });
+for (const sx of [-1, 1]) {
+  part(new THREE.CapsuleGeometry(0.17, 0.3, 8, 24), legMat, body, { pos: [sx * 0.2, 0.36, 0.02] });
+  const foot = part(new THREE.SphereGeometry(0.2, 32, 16), legMat, body, { pos: [sx * 0.21, 0.11, 0.08], scale: [1, 0.6, 1.25] });
+  for (const tx of [-0.06, 0.06]) part(new THREE.BoxGeometry(0.014, 0.06, 0.03), new THREE.MeshBasicMaterial({ color: COL.ink }), body, { pos: [sx * 0.21 + tx, 0.12, 0.318], rot: [-0.5, 0, 0], outline: false });
+}
+
+/* ---- hanging arm (character's left, screen right) ---- */
+const armL = new THREE.Group(); armL.position.set(0.42, 1.17, 0); body.add(armL);
+part(new THREE.CapsuleGeometry(0.13, 0.2, 8, 24), toon({ color: COL.grey, color2: COL.grey2, g0: -0.35, g1: 0 }), armL, { pos: [0, -0.16, 0] });
+part(new THREE.CapsuleGeometry(0.185, 0.26, 8, 24), toon({ color: COL.mitt, color2: COL.mitt2, g0: -0.8, g1: -0.3 }), armL, { pos: [0, -0.52, 0] });
+const lightL = lightButton(armL, 0.07, [0.175, -0.45, 0.02], [1, 0.05, 0.15]);
+
+/* ---- raised paw arm (character's right, screen left) ---- */
+const armR = new THREE.Group(); armR.position.set(-0.4, 1.16, 0); body.add(armR);
+part(new THREE.CapsuleGeometry(0.13, 0.2, 8, 24), toon({ color: COL.grey, color2: COL.grey2 }), armR, { pos: [-0.16, -0.02, 0], rot: [0, 0, Math.PI / 2] });
+part(new THREE.CapsuleGeometry(0.15, 0.22, 8, 24), toon({ color: COL.navy, color2: COL.navy2, g0: -0.2, g1: 0.2 }), armR, { pos: [-0.42, -0.05, 0.02], rot: [0, 0, Math.PI / 2 - 0.15] });
+const paw = new THREE.Group(); paw.position.set(-0.66, -0.1, 0.06); armR.add(paw);
+const PAW = { r: 0.36, sy: 1.06, sz: 0.62 };
+part(new THREE.SphereGeometry(PAW.r, 48, 24), toon({ color: COL.navy, color2: COL.navy2, g0: -0.3, g1: 0.3 }), paw, { scale: [1, PAW.sy, PAW.sz] });
+const pads = [[0.12, -0.02, 0.115], [-0.13, 0.19, 0.066], [-0.2, -0.02, 0.07], [-0.1, -0.22, 0.066]].map(([x, y, r]) => {
+  const zr = PAW.r * PAW.sz * Math.sqrt(Math.max(0, 1 - (x * x + (y / PAW.sy) ** 2) / (PAW.r * PAW.r)));
+  const n = [x / (PAW.r * PAW.r), y / (PAW.r * PAW.r * PAW.sy * PAW.sy), zr / (PAW.r * PAW.r * PAW.sz * PAW.sz)];
+  return lightButton(paw, r, [x, y, zr - 0.005], n, 1.7);
+});
+
+/* ---- tail: a tapered tube rebuilt every frame along a swinging chain ---- */
+const TAIL = { n: 90, radial: 12 };
+const tailGeo = new THREE.BufferGeometry();
+{
+  const { n, radial } = TAIL, idx = [];
+  tailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * (radial + 1) * 3), 3));
+  tailGeo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * (radial + 1) * 3), 3));
+  tailGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(n * (radial + 1) * 2), 2));
+  for (let i = 0; i < n - 1; i++) for (let j = 0; j < radial; j++) {
+    const a = i * (radial + 1) + j, b = a + radial + 1;
+    idx.push(a, b, a + 1, b, b + 1, a + 1);
+  }
+  tailGeo.setIndex(idx);
+}
+const tailMat = toon({ color: COL.tail, color2: COL.tail2, g0: 0.5, g1: 1.4, rim: 1.8 });
+const tail = new THREE.Mesh(tailGeo, tailMat); body.add(tail);
+const tailHull = new THREE.Mesh(tailGeo, OUTLINE); tail.add(tailHull);
+tail.frustumCulled = tailHull.frustumCulled = false;
+// rest pose: segment directions from the base at the lower back, sweeping out to screen right and curling up
+const TAIL_DIRS = [[0.35, -0.2, -1], [1, -0.25, -0.35], [1, 0.3, 0.15], [0.3, 1, 0.3], [-0.4, 1, 0.2], [-1, 0.3, 0.05], [-0.5, -0.85, 0]]
+  .map(d => new THREE.Vector3(...d).normalize());
+const TAIL_LEN = [0.26, 0.5, 0.44, 0.42, 0.3, 0.17, 0.12];
+function updateTail(t) {
+  const pts = [new THREE.Vector3(0, 0.62, -0.36)];
+  const q = new THREE.Quaternion(), e = new THREE.Euler();
+  for (let i = 0; i < TAIL_DIRS.length; i++) {
+    const k = (i + 1) / TAIL_DIRS.length;
+    e.set(0.16 * k * loopSin(t, 3, -i * 0.7), 0.42 * k * loopSin(t, 3, -i * 0.55 + 0.4), 0.14 * k * loopSin(t, 3, -i * 0.6 + 1.2));
+    q.setFromEuler(e);
+    pts.push(pts[i].clone().addScaledVector(TAIL_DIRS[i].clone().applyQuaternion(q), TAIL_LEN[i]));
+  }
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  const { n, radial } = TAIL, P = tailGeo.attributes.position.array, N = tailGeo.attributes.normal.array;
+  const sp = curve.getSpacedPoints(n - 1);
+  let nrm = new THREE.Vector3(0, 0, 1), tan = new THREE.Vector3(), bin = new THREE.Vector3(), d = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    tan.subVectors(sp[Math.min(i + 1, n - 1)], sp[Math.max(i - 1, 0)]).normalize();
+    nrm.sub(tan.clone().multiplyScalar(nrm.dot(tan))).normalize();   // parallel transport
+    bin.crossVectors(tan, nrm);
+    const u = i / (n - 1);
+    const r = 0.075 * (1 - 0.35 * u) * Math.sqrt(clamp((1 - u) / 0.06)) + 0.0005;
+    for (let j = 0; j <= radial; j++) {
+      const a = j / radial * TAU;
+      d.copy(nrm).multiplyScalar(Math.cos(a)).addScaledVector(bin, Math.sin(a));
+      const o = (i * (radial + 1) + j) * 3;
+      P[o] = sp[i].x + d.x * r; P[o + 1] = sp[i].y + d.y * r; P[o + 2] = sp[i].z + d.z * r;
+      N[o] = d.x; N[o + 1] = d.y; N[o + 2] = d.z;
+    }
+  }
+  tailGeo.attributes.position.needsUpdate = true; tailGeo.attributes.normal.needsUpdate = true;
+}
+
+/* ---- head ---- */
+const head = new THREE.Group(); head.position.set(0, 2.2, 0); char.add(head);
+const skull = new THREE.Group(); skull.scale.set(1.05, 0.93, 0.98); head.add(skull);
+part(new THREE.SphereGeometry(1, 64, 48), toon({ color: COL.shell, color2: COL.shell2, g0: -1, g1: 0.6, spec: 0.18 }), skull);
+// grey face frame and the screen, both caps tipped slightly down
+const FRAME_DIR = new THREE.Euler(0.12, 0, 0);
+const frame = part(capGeo(1.014, 1.3), toon({ color: COL.grey, color2: COL.grey2, g0: -0.9, g1: 0.6, spec: 0.2 }), skull, { outline: false });
+frame.rotation.copy(FRAME_DIR);
+const VISOR_ANG = 1.03;
+// face screen texture: drawn on a coarse LED grid every frame
+const FACE = { N: 76, S: 1024 };
+const faceLo = document.createElement('canvas'); faceLo.width = faceLo.height = FACE.N;
+const fl = faceLo.getContext('2d', { willReadFrequently: true });
+const faceCv = document.createElement('canvas'); faceCv.width = faceCv.height = FACE.S;
+const fc = faceCv.getContext('2d');
+const faceTex = new THREE.CanvasTexture(faceCv); faceTex.colorSpace = THREE.SRGBColorSpace; faceTex.anisotropy = 8;
+const visorMat = new THREE.ShaderMaterial({
+  uniforms: { ...U, uMap: { value: faceTex } },
+  vertexShader: TOON_V,
+  fragmentShader: /* glsl */`
+    uniform sampler2D uMap; uniform vec3 uKeyV, uRimV1, uRimV2;
+    varying vec3 vN; varying vec3 vV; varying vec2 vUv;
+    void main() {
+      vec3 n = normalize(vN), v = normalize(vV);
+      vec3 tx = texture2D(uMap, vUv).rgb;
+      float led = smoothstep(0.3, 0.75, tx.g);
+      vec3 col = tx * (1.0 + led * 2.4);
+      float r = dot(reflect(-uKeyV, n), v);
+      col += vec3(0.75, 0.95, 1.0) * smoothstep(0.978, 0.986, r) * 0.45;          // glossy glint
+      col += vec3(0.4, 0.9, 1.0) * smoothstep(0.6, 0.95, r) * 0.04;
+      float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+      col += vec3(0.2, 0.7, 0.9) * fres * 0.35;
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+const visor = new THREE.Mesh(capGeo(1.04, VISOR_ANG), visorMat); visor.rotation.copy(FRAME_DIR); skull.add(visor);
+// ink rings along the screen edge and the frame edge read as the drawing's outlines
+for (const [r, ang, w] of [[1.04, VISOR_ANG, 0.024], [1.014, 1.3, 0.016]]) {
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(r * Math.sin(ang), w, 10, 120), new THREE.MeshBasicMaterial({ color: COL.ink }));
+  const g = new THREE.Group(); g.rotation.copy(FRAME_DIR); ring.position.z = r * Math.cos(ang); g.add(ring); skull.add(g);
+}
+// headphones
+const phones = [];
+for (const sx of [-1, 1]) {
+  const g = new THREE.Group(); g.position.set(sx * 1.0, 0.1, -0.08); g.rotation.z = -sx * Math.PI / 2; head.add(g);
+  part(new THREE.CylinderGeometry(0.31, 0.33, 0.2, 48), toon({ color: COL.grey, color2: COL.grey2, g0: -0.1, g1: 0.1 }), g, { pos: [0, 0.06, 0], outlineW: 0.016 });
+  const disc = part(new THREE.CylinderGeometry(0.2, 0.21, 0.1, 48), toon({ color: COL.purple, color2: COL.purple2, emissive: '#3a0050', rim: 0.3 }), g, { pos: [0, 0.19, 0], outlineW: 0.012 });
+  phones.push(disc);
+}
+// ears: a chunky extruded triangle with a flat grey inner face
+const ears = [];
+function triShape(w, h, lean) {
+  const s = new THREE.Shape(); s.moveTo(-w / 2, 0); s.lineTo(w / 2, 0); s.lineTo(lean, h); s.closePath(); return s;
+}
+for (const sx of [-1, 1]) {
+  const pivot = new THREE.Group(); pivot.position.set(sx * 0.58, 0.6, -0.02); pivot.rotation.set(-0.12, 0, -sx * 0.42); head.add(pivot);
+  const outerG = new THREE.ExtrudeGeometry(triShape(0.82, 0.98, sx * 0.12), { depth: 0.24, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.035, bevelSegments: 3 });
+  outerG.translate(0, -0.08, -0.12);
+  part(outerG, toon({ color: COL.purple, color2: COL.purple2, g0: 0.9, g1: 0.1, rim: 0.6, emissive: '#1a0024' }), pivot);
+  const innerG = new THREE.ExtrudeGeometry(triShape(0.34, 0.6, sx * 0.08), { depth: 0.04, bevelEnabled: true, bevelThickness: 0.015, bevelSize: 0.015, bevelSegments: 2 });
+  innerG.translate(-sx * 0.1, 0.02, 0.16);
+  part(innerG, toon({ color: COL.earIn, color2: COL.earIn2, g0: 0.7, g1: 0.0, rim: 0.3 }), pivot, { outlineW: 0.012 });
+  ears.push(pivot);
+}
+
+/* ---- pixel hearts that pop out during the happy beat ---- */
+const heartGeo = (() => {
+  const s = new THREE.Shape();
+  s.moveTo(0, -0.3); s.bezierCurveTo(-0.05, -0.25, -0.36, -0.05, -0.36, 0.13); s.bezierCurveTo(-0.36, 0.32, -0.12, 0.38, 0, 0.21);
+  s.bezierCurveTo(0.12, 0.38, 0.36, 0.32, 0.36, 0.13); s.bezierCurveTo(0.36, -0.05, 0.05, -0.25, 0, -0.3);
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.1, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.04, bevelSegments: 4 });
+  g.center(); return g;
+})();
+const hearts = [[0.75, 2.2, 0.0], [-0.55, 2.45, 0.6], [0.2, 2.6, 1.1]].map(([x, t0, ph]) => {
+  const m = part(heartGeo, toon({ color: COL.pink, color2: COL.magenta, g0: -0.3, g1: 0.3, emissive: '#c0108f', rim: 0.6 }), world, { outlineW: 0.016 });
+  m.userData = { x, t0, ph }; return m;
+});
+
+/* ================= the stage ================= */
+// screen-space background: deep purple radial glow, faint hex lattice that parallaxes with the camera
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uYaw: { value: 0 }, uT: { value: 0 } },
+  depthWrite: false, depthTest: false,
+  vertexShader: `varying vec2 vP; void main(){ vP = position.xy; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform float uYaw, uT; varying vec2 vP;
+    float hexd(vec2 p) { p = abs(p); return max(dot(p, vec2(0.8660254, 0.5)), p.y); }
+    vec2 hexCell(vec2 p) {
+      vec2 r = vec2(1.0, 1.7320508), h = r * 0.5;
+      vec2 a = mod(p, r) - h, b = mod(p - h, r) - h;
+      return dot(a, a) < dot(b, b) ? a : b;
+    }
+    void main() {
+      vec2 p = vP;
+      float d = length(p - vec2(0.0, 0.12));
+      vec3 col = mix(vec3(0.075, 0.012, 0.13), vec3(0.008, 0.002, 0.02), smoothstep(0.0, 1.25, d));
+      col += vec3(0.22, 0.02, 0.32) * exp(-d * d * 3.2) * 0.55;
+      vec2 hp = (p + vec2(uYaw * 0.9, 0.0)) * 5.5;
+      vec2 c = hexCell(hp);
+      float edge = smoothstep(0.47, 0.5, hexd(c));
+      float pulse = 0.5 + 0.5 * sin(6.2831853 * uT / 6.0 * 2.0 - d * 7.0);
+      col += vec3(0.55, 0.1, 0.8) * edge * (0.05 + 0.06 * pulse) * smoothstep(1.3, 0.25, d);
+      col *= 1.0 - 0.45 * smoothstep(0.7, 1.45, d);
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+const bg = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat); bg.frustumCulled = false; bg.renderOrder = -10;
+if (!ALPHA) scene.add(bg);
+
+// network halo behind the head: two hex outlines with glowing validator nodes on the corners
+const halo = new THREE.Group(); halo.position.set(0, 2.1, -1.7); world.add(halo);
+const haloOuter = new THREE.Group(), haloInner = new THREE.Group(); halo.add(haloOuter, haloInner);
+haloOuter.add(new THREE.Mesh(new THREE.TorusGeometry(2.05, 0.02, 4, 6), glow(COL.magenta, 1.1)));
+haloInner.add(new THREE.Mesh(new THREE.TorusGeometry(1.62, 0.012, 4, 6), glow(COL.pink, 0.55)));
+const haloNodes = [];
+for (let i = 0; i < 6; i++) {
+  const a = i / 6 * TAU, m = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), glow(i % 2 ? COL.pink : COL.cyan, 1.6));
+  m.position.set(Math.cos(a) * 2.05, Math.sin(a) * 2.05, 0); haloOuter.add(m); haloNodes.push(m);
+}
+
+// hex platform
+const plat = new THREE.Group(); world.add(plat);
+const platTop = new THREE.ShaderMaterial({
+  uniforms: { uT: { value: 0 }, uShadow: { value: 1 } },
+  vertexShader: `varying vec2 vP; void main(){ vP = position.xz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform float uT, uShadow; varying vec2 vP;
+    float hexd(vec2 p) { p = abs(p); return max(dot(p, vec2(0.5, 0.8660254)), p.x); }
+    void main() {
+      float R = 1.45;
+      float h = hexd(vP) / (R * 0.8660254);
+      vec3 col = mix(vec3(0.16, 0.08, 0.26), vec3(0.06, 0.03, 0.11), h);
+      float rings = fract(h * 3.0 - uT / 6.0 * 3.0);
+      col += vec3(0.85, 0.1, 1.0) * smoothstep(0.86, 0.97, rings) * (1.0 - h) * 0.9;
+      col += vec3(1.0, 0.45, 1.0) * smoothstep(0.86, 0.9, h) * (1.0 - smoothstep(0.93, 0.96, h)) * 1.6;
+      float s = length(vP * vec2(1.0, 1.25)) / (0.62 * uShadow);
+      col *= mix(0.35, 1.0, smoothstep(0.35, 1.05, s));
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+const platSide = toon({ color: '#3a2457', color2: '#160b26', g0: -0.3, g1: 0.1, rim: 0.8 });
+const platBody = new THREE.Mesh(new THREE.CylinderGeometry(1.45, 1.25, 0.3, 6), [platSide, platTop, platSide]);
+platBody.position.y = -0.15; plat.add(platBody);
+const platHull = new THREE.Mesh(hullOf(platBody.geometry), OUTLINE); platBody.add(platHull);
+const rimTop = new THREE.Mesh(new THREE.TorusGeometry(1.45, 0.022, 4, 6), glow(COL.pink, 1.8));
+rimTop.rotation.set(Math.PI / 2, 0, Math.PI / 6); plat.add(rimTop);
+const rimBot = new THREE.Mesh(new THREE.TorusGeometry(1.25, 0.018, 4, 6), glow(COL.magenta, 1.4));
+rimBot.rotation.set(Math.PI / 2, 0, Math.PI / 6); rimBot.position.y = -0.3; plat.add(rimBot);
+// soft hologram column rising from the platform
+const beamMat = new THREE.ShaderMaterial({
+  uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform float uT; varying vec2 vUv;
+    void main() {
+      float fade = pow(1.0 - vUv.y, 2.2);
+      float streak = 0.55 + 0.45 * sin(vUv.x * 6.2831853 * 18.0) * sin(vUv.y * 9.0 - 6.2831853 * uT / 3.0);
+      gl_FragColor = vec4(vec3(0.75, 0.2, 1.0) * fade * streak * 0.07, 1.0);
+    }`,
+});
+const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.32, 3.2, 6, 1, true), beamMat);
+beam.position.y = 1.6; plat.add(beam);
+// floating shards under the platform
+const shards = [];
+for (let i = 0; i < 5; i++) {
+  const m = part(new THREE.CylinderGeometry(0.16, 0.16, 0.08, 6), toon({ color: '#5a2c86', color2: '#24123a', rim: 1.2, emissive: '#120020' }), plat, { outlineW: 0.012 });
+  m.userData = { a: i / 5 * TAU, r: 1.05 + 0.25 * (i % 2), y: -0.46 - 0.1 * (i % 3) };
+  shards.push(m);
+}
+
+// rising pixel particles (each loops an integer number of times per DUR)
+const PN = 150;
+const pGeo = new THREE.BufferGeometry();
+{
+  const pos = new Float32Array(PN * 3), seed = new Float32Array(PN * 4);
+  for (let i = 0; i < PN; i++) seed.set([hash(i) * TAU, 1.5 + hash(i + 50) * 2.2, hash(i + 99), 1 + Math.floor(hash(i + 7) * 2)], i * 4);
+  pGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  pGeo.setAttribute('seed', new THREE.BufferAttribute(seed, 4));
+}
+const pMat = new THREE.ShaderMaterial({
+  uniforms: { uT: { value: 0 }, uScale: { value: 1 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  vertexShader: /* glsl */`
+    attribute vec4 seed; uniform float uT, uScale; varying float vA; varying vec3 vC;
+    void main() {
+      float f = fract(seed.z + seed.w * uT / 6.0);
+      float a = seed.x + f * 1.2;
+      vec3 p = vec3(cos(a) * seed.y, -0.6 + f * 5.2, sin(a) * seed.y - 0.3);
+      vA = smoothstep(0.0, 0.15, f) * (1.0 - smoothstep(0.65, 1.0, f));
+      vC = mod(seed.x * 7.0, 2.0) < 1.0 ? vec3(0.25, 0.95, 1.0) : vec3(1.0, 0.45, 1.0);
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = uScale * (0.05 + 0.04 * fract(seed.x * 3.1)) / -mv.z;
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `varying float vA; varying vec3 vC; void main(){ vec2 q = abs(gl_PointCoord - 0.5); float s = 1.0 - smoothstep(0.32, 0.5, max(q.x, q.y)); gl_FragColor = vec4(vC * 1.6 * vA * s, 1.0); }`,
+});
+const particles = new THREE.Points(pGeo, pMat); particles.frustumCulled = false; world.add(particles);
+
+/* ================= face animation ================= */
+// Timeline (s): 0-1.9 smug, blink, 1.9-3.9 happy, glitch, 4.05-5.4 wink, blink, 5.4-6 smug.
+function faceState(t) {
+  const open = Math.min(clamp(Math.abs(t - 1.9) / 0.1), clamp(Math.abs(t - 5.4) / 0.1), clamp(Math.abs(t - 0.75) / 0.07));
+  let mode = 'smug';
+  if (t >= 1.9 && t < 3.97) mode = 'happy';
+  else if (t >= 3.97 && t < 5.4) mode = 'wink';
+  return { mode, open: Math.max(open, 0.07), glitch: bump(t, 3.86, 4.1), happy: win(t, 1.9, 3.97, 0.25), wink: win(t, 3.97, 5.4, 0.2) };
+}
+function drawFace(t) {
+  const { N, S } = FACE, st = faceState(t), c = fl;
+  c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, N, N);
+  c.setTransform(N / 2, 0, 0, N / 2, N / 2, N / 2);             // face coords: [-1, 1], y down
+  c.fillStyle = c.strokeStyle = '#fff'; c.lineCap = c.lineJoin = 'round';
+  // forehead mark
+  c.save(); c.translate(0, -0.6); c.scale(0.34, 0.34); logoPath(c); c.fill(); c.restore();
+  const eye = (cx, cy, kind, flip) => {
+    c.save(); c.translate(cx, cy); c.scale(flip, st.open);
+    c.beginPath();
+    if (kind === 'smug') {
+      c.moveTo(-0.3, -0.26); c.lineTo(0.27, 0.02);
+      c.quadraticCurveTo(0.22, 0.3, -0.03, 0.3); c.quadraticCurveTo(-0.34, 0.28, -0.3, -0.26); c.fill();
+    } else if (kind === 'happy') {
+      c.lineWidth = 0.13; c.arc(0, 0.18, 0.22, Math.PI * 1.08, Math.PI * 1.92); c.stroke();
+    } else if (kind === 'wink') {
+      c.lineWidth = 0.12; c.moveTo(0.2, -0.16); c.lineTo(-0.16, 0.04); c.lineTo(0.2, 0.22); c.stroke();
+    }
+    c.restore();
+  };
+  if (st.mode === 'smug') { eye(-0.45, 0.04, 'smug', 1); eye(0.45, 0.04, 'smug', -1); }
+  if (st.mode === 'happy') { eye(-0.45, 0.02, 'happy', 1); eye(0.45, 0.02, 'happy', 1); }
+  if (st.mode === 'wink') { eye(-0.45, 0.04, 'smug', 1); eye(0.45, 0.04, 'wink', 1); }
+  // mouth: cat "w", opened into a grin while happy
+  c.beginPath();
+  if (st.mode === 'happy') {
+    c.moveTo(-0.33, 0.44); c.quadraticCurveTo(-0.16, 0.62, 0, 0.47); c.quadraticCurveTo(0.16, 0.62, 0.33, 0.44);
+    c.quadraticCurveTo(0.24, 0.84, 0, 0.84); c.quadraticCurveTo(-0.24, 0.84, -0.33, 0.44); c.fill();
+  } else {
+    c.lineWidth = 0.08;
+    c.moveTo(-0.38, 0.47); c.quadraticCurveTo(-0.2, 0.72, 0, 0.5); c.quadraticCurveTo(0.2, 0.72, 0.38, 0.47); c.stroke();
+  }
+  // sparkle next to the wink
+  if (st.wink > 0) {
+    const k = st.wink * (0.75 + 0.25 * Math.sin(t * 14)), x = 0.68, y = -0.4, r = 0.2 * k, w = 0.05 * k;
+    c.beginPath(); c.moveTo(x, y - r); c.lineTo(x + w, y - w); c.lineTo(x + r, y); c.lineTo(x + w, y + w);
+    c.lineTo(x, y + r); c.lineTo(x - w, y + w); c.lineTo(x - r, y); c.lineTo(x - w, y - w); c.closePath(); c.fill();
+  }
+  const px = c.getImageData(0, 0, N, N).data;
+
+  // compose the LED panel
+  const f = fc, cell = S / N, g = f.createLinearGradient(0, 0, 0, S);
+  g.addColorStop(0, '#22788e'); g.addColorStop(0.35, '#1b3f5c'); g.addColorStop(0.7, '#171c38'); g.addColorStop(1, '#141530');
+  f.fillStyle = g; f.fillRect(0, 0, S, S);
+  const scan = ((t / DUR) * 4) % 1;                                  // four sweeps per loop
+  const gl = st.glitch;
+  for (let y = 0; y < N; y++) {
+    const shift = gl > 0 && hash(y * 3 + Math.floor(t * 30)) < 0.35 * gl ? Math.round((hash(y + Math.floor(t * 30) * 7) - 0.5) * 10 * gl) : 0;
+    const sweep = Math.exp(-(((y / N) - scan) ** 2) / 0.002);
+    for (let x = 0; x < N; x++) {
+      const sx = x - shift, a = sx >= 0 && sx < N ? px[(y * N + sx) * 4 + 3] / 255 : 0;
+      const X = x * cell + cell * 0.14, Y = y * cell + cell * 0.14, w = cell * 0.72;
+      if (a > 0.04) {
+        const b = 0.55 + 0.45 * a + sweep * 0.25;
+        f.fillStyle = `rgba(${Math.round(63 + 120 * sweep)},${Math.round(225 + 30 * sweep)},255,${clamp(b)})`;
+        f.fillRect(X, Y, w, w);
+        if (gl > 0.05) { f.fillStyle = `rgba(255,60,255,${0.55 * gl * a})`; f.fillRect(X + cell * 1.4, Y, w, w); }
+      } else {
+        f.fillStyle = `rgba(90,220,255,${0.035 + sweep * 0.07})`;
+        f.fillRect(X, Y, w, w);
+      }
+    }
+  }
+  faceTex.needsUpdate = true;
+  return st;
+}
+
+/* ================= renderAt ================= */
+let composer = null;
+const camTarget = new THREE.Vector3();
+function layout() {
+  const w = canvas.clientWidth || 1080, h = canvas.clientHeight || 1080;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  if (!ALPHA) {
+    const pr = renderer.getPixelRatio();
+    const rt = new THREE.WebGLRenderTarget(w * pr, h * pr, { type: THREE.HalfFloatType, samples: 4 });
+    composer = new EffectComposer(renderer, rt);
+    composer.addPass(new RenderPass(scene, camera));
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(w * pr, h * pr), 0.5, 0.45, 1.0));
+    composer.addPass(new OutputPass());
+  }
+  pMat.uniforms.uScale.value = h * renderer.getPixelRatio() * 1.6;
+}
+
+function render(t) {
+  t = ((t % DUR) + DUR) % DUR;
+  const st = drawFace(t);
+
+  // camera: a slow sway around the character, two gentle dips per loop
+  const yaw = 0.32 * loopSin(t, 1), dist = 11.2 + 0.25 * loopSin(t, 1, 1.3);
+  camera.position.set(Math.sin(yaw) * dist, 2.35 + 0.18 * loopSin(t, 2, 0.6), Math.cos(yaw) * dist);
+  camTarget.set(0, 1.68, 0); camera.lookAt(camTarget);
+  camera.updateMatrixWorld();
+  for (const [k, v] of [['uKeyV', 'key'], ['uRimV1', 'rim1'], ['uRimV2', 'rim2']]) U[k].value.copy(LIGHT[v]).transformDirection(camera.matrixWorldInverse);
+  bgMat.uniforms.uYaw.value = yaw; bgMat.uniforms.uT.value = t;
+
+  // hover: two bobs per loop with a little squash at the bottom
+  const bob = loopSin(t, 2);
+  char.position.y = 0.36 + 0.13 * bob;
+  char.rotation.set(0.03 * loopSin(t, 2, -1.2), 0.14 * loopSin(t, 1, 0.9) - yaw * 0.25, 0.035 * loopSin(t, 1, 0.3));
+  char.scale.set(1 - 0.012 * bob, 1 + 0.015 * bob, 1 - 0.012 * bob);
+  head.rotation.set(-0.05 * loopSin(t, 2, -0.9) - 0.05 * st.happy, 0.12 * loopSin(t, 1, 2.0), 0.07 * loopSin(t, 1, 1.0) + 0.12 * st.happy * Math.sin(Math.PI * seg(t, 1.9, 3.97)) - 0.1 * st.wink);
+  // ears twitch twice a loop
+  const tw = (a, b) => bump(t, a, b) * Math.sin(TAU * 2 * seg(t, a, b));
+  ears[0].rotation.set(-0.12 + 0.18 * tw(1.15, 1.45), 0, 0.42 + 0.06 * loopSin(t, 2, 0.5) + 0.14 * tw(4.3, 4.6));
+  ears[1].rotation.set(-0.12 + 0.18 * tw(4.3, 4.6), 0, -0.42 - 0.06 * loopSin(t, 2, 0.5) - 0.14 * tw(1.15, 1.45));
+  // raised paw: idle sway, a real wave during the happy beat
+  const wave = win(t, 2.0, 3.85, 0.3);
+  armR.rotation.set(0, 0.1 * loopSin(t, 1), -0.08 + 0.05 * loopSin(t, 2, 0.4) - 0.28 * wave);
+  paw.rotation.set(0, 0.15 * wave, 0.38 * wave * Math.sin(TAU * (t - 2.0) / 0.55));
+  armL.rotation.set(0.06 * loopSin(t, 2, 1.0), 0, 0.25 + 0.05 * loopSin(t, 2, 0.2));
+  updateTail(t);
+
+  // glowing bits
+  const pulse = 0.5 + 0.5 * loopSin(t, 3);
+  const cy = new THREE.Color(COL.cyan);
+  for (const d of [...pads, lightL, backLight]) d.material.color.copy(cy).multiplyScalar(1.3 + 0.6 * pulse + 0.8 * st.happy);
+  phones.forEach((d, i) => d.material.uniforms.uEmis.value.setRGB(0.35, 0.0, 0.55).multiplyScalar(0.35 + 0.65 * (0.5 + 0.5 * loopSin(t, 4, i * 1.5))));
+
+  hearts.forEach(m => {
+    const { x, t0, ph } = m.userData, k = seg(t, t0, t0 + 1.35);
+    const s = k <= 0 || k >= 1 ? 0 : Math.min(1, smooth(k / 0.2) * 1.15) * (1 - smooth(seg(k, 0.7, 1)));
+    m.visible = s > 0.001;
+    m.scale.setScalar(0.42 * s);
+    m.position.set(x + 0.15 * Math.sin(k * 5 + ph), char.position.y + 2.95 + k * 0.6, 0.35);
+    m.rotation.set(0, 0.5 * Math.sin(k * 6 + ph), 0.25 * Math.sin(k * 4 + ph));
+  });
+
+  // stage
+  plat.position.y = -0.05 * loopSin(t, 2, -0.8);
+  plat.rotation.y = t / DUR * (Math.PI / 3);                           // 60 deg per loop: a hexagon maps onto itself
+  platTop.uniforms.uT.value = t; platTop.uniforms.uShadow.value = 1 - 0.12 * bob;
+  beamMat.uniforms.uT.value = t;
+  shards.forEach((m, i) => {
+    const { a, r, y } = m.userData, aa = a - t / DUR * TAU;
+    m.position.set(Math.cos(aa) * r, y + 0.07 * loopSin(t, 2, i), Math.sin(aa) * r);
+    m.rotation.set(0.5 * loopSin(t, 1, i), t / DUR * TAU, 0.3);
+  });
+  haloOuter.rotation.z = -t / DUR * (Math.PI / 3);
+  haloInner.rotation.z = t / DUR * (Math.PI / 3) + Math.PI / 6;
+  halo.position.y = 2.1 + 0.06 * loopSin(t, 2, -0.5);
+  haloNodes.forEach((m, i) => m.scale.setScalar(0.8 + 0.5 * Math.max(0, Math.sin(TAU * (t / DUR * 2 - i / 6)))));
+  pMat.uniforms.uT.value = t;
+
+  if (composer) composer.render(); else renderer.render(scene, camera);
+}
+
+/* ================= player ================= */
+const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub'), timeEl = document.getElementById('time');
+let playing = !MODE, t0 = performance.now(), cur = 0;
+function tick(now) {
+  if (playing) { cur = ((now - t0) / 1000) % DUR; render(cur); scrub.value = cur; timeEl.textContent = `${cur.toFixed(2)} / ${DUR.toFixed(1)}`; }
+  requestAnimationFrame(tick);
+}
+playBtn.onclick = () => {
+  playing = !playing;
+  if (playing) t0 = performance.now() - cur * 1000;
+  playBtn.innerHTML = playing ? '&#10073;&#10073; Pause' : '&#9654; Play';
+};
+scrub.oninput = () => { cur = +scrub.value; if (playing) t0 = performance.now() - cur * 1000; else render(cur); timeEl.textContent = `${cur.toFixed(2)} / ${DUR.toFixed(1)}`; };
+addEventListener('resize', () => { layout(); render(cur); });
+
+layout();
+render(0);
+window.renderAt = t => render(t);
+window.DURATION = DUR;
+window.READY = true;
+if (!MODE) requestAnimationFrame(tick);
+</script>
+</body>
+</html>
